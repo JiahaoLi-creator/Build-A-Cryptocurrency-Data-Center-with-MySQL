@@ -15,6 +15,7 @@ from Function import MINUTE, floor_time, utc_now
 from feeds import WS_URL, ingest_message, save_data_to_csv
 from recovery import advance_checkpoint, catch_up, checkpoint, maintain_history
 from storage import open_engine, save_data_to_mysql, symbols
+from trading_calendar import suspension_at
 
 
 def on_open(ws):
@@ -87,6 +88,9 @@ def main():
         # Establish the tracked range before any new live candle can arrive.
         for symbol in selected:
             checkpoint(engine, symbol, cutoff)
+        if args.once and all(suspension_at(symbol, cutoff) for symbol in selected):
+            print("All configured symbols are suspended. Checking earlier trading minutes.", flush=True)
+            return 0 if catch_up(engine, selected, cutoff) else 1
         wake, stopping = threading.Event(), threading.Event()
         with ThreadPoolExecutor(max_workers=1, thread_name_prefix="recovery") as pool:
             history = pool.submit(maintain_history, engine, selected, wake, stopping, args.once)

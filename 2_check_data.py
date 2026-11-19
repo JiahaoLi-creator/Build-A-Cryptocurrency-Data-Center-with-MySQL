@@ -8,6 +8,7 @@ import requests
 from Function import MINUTE, floor_time, parse_utc, sleep_until_run_time, utc_now
 from feeds import get_data_via_http
 from storage import get_data_from_mysql, open_engine, save_data_to_mysql, symbols
+from trading_calendar import periods
 from windows import check_missing_data, repair_window
 
 
@@ -32,7 +33,8 @@ def main():
                     print(f"{symbol} REST repair failed: {exc}", file=sys.stderr, flush=True)
                     status = 1
                     break
-                print(f"{symbol} [{start}, {end}) UTC | missing={len(remaining)}", flush=True)
+                suspended = sum((right - left) // MINUTE for left, right, halt in periods(symbol, start, end) if halt)
+                print(f"{symbol} [{start}, {end}) UTC | missing={len(remaining)} | suspended={suspended}", flush=True)
                 if len(remaining):
                     status = 1
             if args.once:

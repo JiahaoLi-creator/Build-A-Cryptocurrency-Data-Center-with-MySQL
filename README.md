@@ -1,6 +1,6 @@
 # Binance Spot Market Data Center
 
-This project stores closed, one-minute Binance Spot candles in MySQL. The WebSocket collector records live candles and automatically backfills missed minutes over REST after a restart or reconnection. A historical importer loads verified daily archives into the same table. A reconciliation command compares stored prices, volumes and trade counts with the archive by UTC minute. The reader builds open, high, low, close and volume (OHLCV) bars from complete windows.
+This project stores closed, one-minute Binance Spot candles in MySQL. The WebSocket collector recovers missed trading minutes over REST after a restart or reconnection. A trading calendar excludes exchange-confirmed suspensions from backfill and aggregation. A historical importer loads verified daily archives into the same table. A reconciliation command compares stored prices, volumes and trade counts with the archive by UTC minute. The reader builds open, high, low, close and volume (OHLCV) bars from complete windows.
 
 ## Run the sample
 
@@ -75,6 +75,26 @@ Three separate Python processes run the collector's normal `--once` entry point 
 
 The 182 rows include one live candle on each side of the outage. The replay compares all nine market fields with the archive and verifies that the next minute to check is 04:01 UTC. [Replay code](outage_demo.py) · [Linux verification runs](https://github.com/JiahaoLi-creator/Build-A-Cryptocurrency-Data-Center-with-MySQL/actions/workflows/archive-replay.yml)
 
+## Reproduce a trading suspension and a missing minute
+
+From the cloned repository, run the following command with the sample prerequisites and internet access.
+
+```bash
+bash scripts/reproduce.sh --suspension
+```
+
+Binance stopped VIDTUSDT Spot trading on October 31, 2022 at 03:00 UTC for a token swap. Trading reopened on November 9 at 08:00 UTC. The **13,260-minute** suspension includes the stop time and excludes the reopening time. The two checksum-verified daily archives place the last pre-suspension candle at 02:59 and the first relisted candle at 08:00. Prices on each side retain their original traded units. [Exchange announcement](https://www.binance.com/en/support/announcement/detail/ef40b40af1944bc9b399ad9c52861a04)
+
+The replay uses the last five minutes before delisting and the first five after relisting. It deliberately omits **2022-11-09 08:02 UTC**. A bounded audit checks the entire suspension. The normal collector then starts with a simulated clock and a recorded WebSocket close. It fetches the omitted minute from the public Spot REST endpoint. The replay records the time bounds of every backfill HTTP request and compares all nine stored fields against the archives.
+
+| Stage | Backfill requests | Requests touching the suspension | Unique minutes in MySQL | Raw rows in suspension | Complete five-minute bars |
+|---|---:|---:|---:|---:|---:|
+| Suspension-only audit | 0 | 0 | 9 | 0 | 1 |
+| Automatic recovery | 1 | 0 | 10 | 0 | 2 |
+| Repeat startup | 0 | 0 | 10 | 0 | 2 |
+
+The only five-minute bars open at **October 31 02:55 UTC** and **November 9 08:00 UTC**. The checkpoint ends at November 9 08:05 UTC. [Replay code](suspension_demo.py) · [Linux verification runs](https://github.com/JiahaoLi-creator/Build-A-Cryptocurrency-Data-Center-with-MySQL/actions/workflows/archive-replay.yml)
+
 ## Run against a persistent MySQL database
 
 Create a UTC database and a local application account as a MySQL administrator. MySQL returns the generated password for use in the local configuration. For a Unix socket connection, use `localhost` as the account host.
@@ -115,7 +135,7 @@ python archive.py import --symbol BTCUSDT --start 2024-12-31 --end 2025-01-02
 python archive.py reconcile --symbol BTCUSDT --start 2024-12-31 --end 2025-01-02 > differences.csv
 ```
 
-Each command downloads the official daily one-minute ZIP and its `.CHECKSUM`. It verifies the SHA-256 digest, UTC date, timestamp unit, minute alignment and unique source keys before using a file. Valid partial trading days retain the minutes present in the archive. The importer commits one day at a time. An interrupted range can be replayed safely, and a previously stored candle keeps its original values. To use a saved snapshot, pass `--archive-dir DIR` to either command and put the ZIP files and their matching `.zip.CHECKSUM` files together in that directory. [Binance public archive format](https://github.com/binance/binance-public-data#data-information)
+Each command downloads the official daily one-minute ZIP and its `.CHECKSUM` for dates with expected trading minutes. It verifies the SHA-256 digest, UTC date, timestamp unit, minute alignment and unique source keys before using a file. Valid partial trading days retain the minutes present in the archive. A fully suspended UTC day skips the download, and reconciliation reports any existing MySQL candle on that date as `unexpected_in_mysql`. The importer commits one day at a time. An interrupted range can be replayed safely, and a previously stored candle keeps its original values. To use a saved snapshot, pass `--archive-dir DIR` to either command and put the ZIP files and their matching `.zip.CHECKSUM` files together in that directory. [Binance public archive format](https://github.com/binance/binance-public-data#data-information)
 
 Reconciliation reads MySQL without changing it. It compares open, high, low, close, base volume, quote volume, trade count, taker-buy base volume and taker-buy quote volume at each UTC open time. Prices and quantities use exact decimal arithmetic. The CSV contains one row per differing field, with `delta = mysql_value - archive_value`. A minute present on only one side produces a single `missing_in_mysql` or `unexpected_in_mysql` row. Progress, source hashes and totals go to standard error.
 
@@ -127,7 +147,7 @@ Reconciliation reads MySQL without changing it. It compares open, high, low, clo
 
 ### Collect, repair and read
 
-The collector automatically resumes each configured symbol and exits after one live close in `--once` mode. The second command is a separate, bounded audit of the last 15 closed minutes. The reader reports complete bars in the last two five-minute windows.
+The collector automatically resumes each configured symbol and exits after one live close in `--once` mode. If every selected symbol is currently suspended, it checks earlier trading minutes and exits. The second command is a bounded audit of the last 15 closed minutes. The reader reports complete bars in the last two five-minute windows.
 
 ```bash
 python 1_binance_data_to_mysql.py --once
@@ -158,9 +178,13 @@ MySQL stores the next unverified UTC minute for each symbol in `collector_checkp
 
 The collector checks for gaps on startup and when the socket reconnects. In continuous mode it also checks again after 60 seconds. A background worker verifies up to 1,000 closed minutes per symbol per turn and issues REST requests only for missing minutes. It advances the checkpoint through the contiguous rows confirmed in MySQL. An empty or partial response leaves the earliest unresolved minute pending for a retry. If the process stops after writing rows but before updating the checkpoint, the next run reads those rows and requests only what is still missing. A one-time run exits with a nonzero status if recovery is incomplete. The independent repair command's 100-minute default applies only to that command.
 
+### Trading calendar
+
+Each calendar entry identifies a Spot symbol, the first suspended UTC minute, the first minute open for trading again, the reason and an exchange source URL. An empty `resume_utc` marks an ongoing suspension. The collector can advance past a documented closure without inserting candles, and keeps its position at an ongoing closure until a reopening is recorded. To extend the calendar, add an exchange-confirmed interval and restart running jobs. Outside the listed intervals, an absent minute remains eligible for backfill. An exchange-reported zero-volume candle during trading is valid. [Calendar entries](data/spot_suspensions.csv)
+
 ## Data handling
 
 - **Duplicate events.** Table `k` enforces a unique key on `(symbol, time_interval, candle_begin_time)`. WebSocket, REST and archive imports all retain the first stored candle for that key. Prices and quantities use `DECIMAL`. The optional `candles_utc.csv` records WebSocket arrivals and can contain repeated events. Set `CSV_FILE=` to disable that log.
-- **Missing minutes.** The repair job checks every minute from the inclusive start to the exclusive end, including gaps at either edge. Its default window is the last 100 closed minutes. Use `--minutes` and `--end` to select another range. Each REST request covers at most 1,000 consecutive missing minutes. If gaps remain, a one-time run reports the count and exits with a nonzero status. [Binance candlestick endpoint](https://developers.binance.com/docs/binance-spot-api-docs/rest-api/market-data-endpoints)
+- **Missing minutes.** The repair job checks expected trading minutes from the inclusive start to the exclusive end, including gaps at either edge. It reports missing and suspended minutes separately. Its default window is the last 100 closed minutes. Use `--minutes` and `--end` to select another range. Each REST request covers at most 1,000 consecutive missing trading minutes. If gaps remain, a one-time run reports the count and exits with a nonzero status. [Binance candlestick endpoint](https://developers.binance.com/docs/binance-spot-api-docs/rest-api/market-data-endpoints)
 - **Complete bars.** Windows align to UTC boundaries. The reader uses the first open, highest high, lowest low, last close and total volume. A five-minute bar requires five distinct closed minutes. During a live read, the reader waits up to about five seconds for the latest closed minute. If it is still missing, the reader skips that symbol. It reports how many requested windows are complete.
 - **Existing data.** The default database is `binance_utc`. When importing an existing `binance.k` table, identify the source time zone, convert open times to UTC and reconcile duplicate candle keys before loading the data.

@@ -7,6 +7,8 @@ import pandas as pd
 from sqlalchemy import URL, create_engine, inspect, text
 from sqlalchemy.engine import Connection
 
+from trading_calendar import check_trading_rows
+
 KEY = ["symbol", "time_interval", "candle_begin_time"]
 OHLCV = ["open", "high", "low", "close", "volume"]
 FIELDS = KEY + OHLCV + [
@@ -81,6 +83,7 @@ def save_data_to_mysql(engine, table_name, df):
     """Insert closed candles. The first stored row for a candle key wins."""
     if df.empty:
         return
+    check_trading_rows(df)
     rows = df[FIELDS].to_dict("records")
     values = ", ".join(":" + k for k in FIELDS)
     stmt = text(f"INSERT INTO {table_identifier(table_name)} ({', '.join(FIELDS)}) VALUES ({values}) "

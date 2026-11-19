@@ -1,7 +1,6 @@
 """Replay BTCUSDT WebSocket boundaries and recover the missing candles from public REST into MySQL."""
 
 import csv
-import json
 import os
 import subprocess
 import sys
@@ -16,7 +15,7 @@ from sqlalchemy import text
 
 import recovery
 from archive import differences, read_day
-from demo import check, websocket_event
+from demo import check, recorded_socket, websocket_event
 from feeds import epoch_ms, request_klines
 from Function import MINUTE
 from storage import get_data_from_mysql, open_engine
@@ -58,28 +57,14 @@ def collector_process(stage, path):
             db.dispose()
         return response
 
-    class RecordedSocket:
-        def __init__(self, url, *, on_open, on_message, on_error, on_close):
-            self.on_open, self.on_message = on_open, on_message
+    def before_message():
+        if stage == "restart":
+            check(rest_started.wait(10), "startup never requested the missing candles")
 
-        def send(self, message):
-            request = json.loads(message)
-            check(request["method"] == "SUBSCRIBE" and request["params"] == ["btcusdt@kline_1m"],
-                  "unexpected WebSocket subscription")
-
-        def run_forever(self, **options):
-            self.on_open(self)
-            if stage == "restart":
-                check(rest_started.wait(10), "startup never requested the missing candles")
-            self.on_message(self, json.dumps(websocket_event(live_row)))
-            live_saved.set()
-
-        def close(self):
-            pass
-
+    socket = recorded_socket(SYMBOL, websocket_event(live_row), before_message=before_message, after_message=live_saved.set)
     with (patch.object(sys, "argv", ["1_binance_data_to_mysql.py", "--once"]),
           patch.object(collector, "utc_now", clock), patch.object(recovery, "utc_now", clock),
-          patch.object(collector.websocket, "WebSocketApp", RecordedSocket),
+          patch.object(collector.websocket, "WebSocketApp", socket),
           patch("feeds.request_klines", market_rest)):
         check(collector.main() == 0, f"{stage} collector failed")
     expected = [expected_request] if stage == "restart" else []

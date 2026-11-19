@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mode: [archives, outage]
+        mode: [archives, outage, suspension]
     runs-on: ubuntu-24.04
     container: debian:12-slim
     timeout-minutes: 15
