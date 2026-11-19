@@ -1,6 +1,7 @@
 """Replay 10 synthetic candles through the production pipeline in a temporary MySQL table."""
 
 import csv
+import json
 from decimal import Decimal
 from pathlib import Path
 
@@ -19,8 +20,8 @@ def read_csv(name):
         return list(csv.DictReader(stream))
 
 
-def websocket_event(row, closed=True):
-    return {"e": "kline", "s": SYMBOL, "k": {
+def websocket_event(row, closed=True, symbol=SYMBOL):
+    return {"e": "kline", "s": symbol, "k": {
         "i": "1m", "t": epoch_ms(parse_utc(row["utc"])), "x": closed,
         "o": row["open"], "h": row["high"], "l": row["low"], "c": row["close"],
         "v": row["volume"], "q": row["quote_volume"], "n": int(row["trade_num"]),
@@ -38,6 +39,31 @@ def rest_row(row):
 def check(condition, description):
     if not condition:
         raise AssertionError(description)
+
+
+def recorded_socket(symbol, event, *, before_message=None, after_message=None):
+    """Replay one close through the collector's subscription and message callbacks."""
+    class RecordedSocket:
+        def __init__(self, url, *, on_open, on_message, on_error, on_close):
+            self.on_open, self.on_message = on_open, on_message
+
+        def send(self, message):
+            request = json.loads(message)
+            check(request["method"] == "SUBSCRIBE" and request["params"] == [f"{symbol.lower()}@kline_1m"],
+                  "unexpected WebSocket subscription")
+
+        def run_forever(self, **options):
+            self.on_open(self)
+            if before_message:
+                before_message()
+            self.on_message(self, json.dumps(event, default=str))
+            if after_message:
+                after_message()
+
+        def close(self):
+            pass
+
+    return RecordedSocket
 
 
 def values(frame):

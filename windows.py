@@ -8,13 +8,19 @@ from sqlalchemy import text
 from Function import MINUTE, floor_time, interval_delta, utc_now
 from feeds import epoch_ms, get_data_via_http
 from storage import OHLCV, get_data_from_mysql, save_data_to_mysql, table_identifier
+from trading_calendar import periods, suspended_mask, suspension_at
 
 
-def missing_minutes(frame, start, end):
-    if start >= end or floor_time(start, MINUTE) != start or floor_time(end, MINUTE) != end:
-        raise ValueError("Expected a nonempty half-open range aligned to UTC minutes")
-    expected = pd.date_range(start, end, freq="min", inclusive="left")
-    return expected.difference(pd.DatetimeIndex(frame["candle_begin_time"]))
+def expected_minutes(symbol, start, end):
+    ranges = [pd.date_range(left, right, freq="min", inclusive="left")
+              for left, right, halt in periods(symbol, start, end) if halt is None]
+    return ranges[0].append(ranges[1:]) if ranges else pd.DatetimeIndex([])
+
+
+def missing_minutes(frame, start, end, symbol=None):
+    if symbol is None and "symbol" in frame and frame["symbol"].nunique() == 1:
+        symbol = frame["symbol"].iloc[0]
+    return expected_minutes(symbol or "", start, end).difference(pd.DatetimeIndex(frame["candle_begin_time"]))
 
 
 def gap_requests(missing, symbol):
@@ -44,14 +50,18 @@ def repair_window(engine, table_name, symbol, start, end, fetch=None, now=None):
     cutoff = utc_now() if now is None else now
     if end > floor_time(cutoff, MINUTE):
         raise ValueError("The repair range includes an open or future candle")
+    expected = expected_minutes(symbol, start, end)
+    if expected.empty:
+        return expected
     bounds = dict(symbol=symbol, begin_time=start, end_time=end)
     stored = get_data_from_mysql(engine, table_name, **bounds)
-    gaps = missing_minutes(stored, start, end)
-    if len(gaps):
-        recovered = get_data_via_http(gap_requests(gaps, symbol), fetch=fetch, now=cutoff)
-        save_data_to_mysql(engine, table_name, recovered)
-        stored = get_data_from_mysql(engine, table_name, **bounds)
-    return missing_minutes(stored, start, end)
+    gaps = expected.difference(pd.DatetimeIndex(stored["candle_begin_time"]))
+    if gaps.empty:
+        return gaps
+    recovered = get_data_via_http(gap_requests(gaps, symbol), fetch=fetch, now=cutoff)
+    save_data_to_mysql(engine, table_name, recovered)
+    stored = get_data_from_mysql(engine, table_name, **bounds)
+    return expected.difference(pd.DatetimeIndex(stored["candle_begin_time"]))
 
 
 def get_newest_candle_begin_time(engine=None, table_name="k", symbol="BTCUSDT"):
@@ -62,6 +72,8 @@ def get_newest_candle_begin_time(engine=None, table_name="k", symbol="BTCUSDT"):
 
 def if_data_available(engine=None, table_name="k", symbol="BTCUSDT", as_of=None):
     end = floor_time(utc_now() if as_of is None else as_of, MINUTE)
+    if suspension_at(symbol, end - MINUTE):
+        return False
     row = get_data_from_mysql(engine, table_name, symbol=symbol, begin_time=end - MINUTE, end_time=end)
     return not row.empty
 
@@ -80,7 +92,7 @@ def get_k_data(symbol="BTCUSDT", target_time_interval="15m", limit=100,
     frame = frame.sort_index()
     # A full bucket has every distinct minute on the grid exactly once.
     on_grid = frame.index == frame.index.floor("min")
-    frame = frame.loc[on_grid & ~frame.index.duplicated(keep="first")]
+    frame = frame.loc[on_grid & ~frame.index.duplicated(keep="first") & ~suspended_mask(symbol, frame.index)]
     groups = frame.resample(step, origin="epoch", closed="left", label="left")
     with localcontext() as precision:
         precision.prec = 65  # Preserve DECIMAL prices and summed quantities from MySQL.

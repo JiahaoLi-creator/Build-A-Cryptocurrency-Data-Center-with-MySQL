@@ -3,15 +3,10 @@
 set -euo pipefail
 project=$(cd "$(dirname "$0")/.." && pwd)
 python_bin=${PYTHON:-python3.11}
-offline=false
-archives=false
-outage=false
-case "${1:-}" in
-  --offline) offline=true ;;
-  --archives) archives=true ;;
-  --outage) outage=true ;;
-  "") ;;
-  *) echo "Usage: bash scripts/reproduce.sh [--offline|--archives|--outage]" >&2; exit 2 ;;
+mode=${1:-}
+case "$mode" in
+  ""|--offline|--archives|--outage|--suspension) ;;
+  *) echo "Usage: bash scripts/reproduce.sh [--offline|--archives|--outage|--suspension]" >&2; exit 2 ;;
 esac
 for bin in "$python_bin" mysqld mysql mysqladmin; do
   command -v "$bin" >/dev/null || { echo "Missing executable: $bin" >&2; exit 1; }
@@ -31,7 +26,7 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-if [[ "$offline" == false ]]; then
+if [[ "$mode" != --offline ]]; then
   "$python_bin" -m venv "$work/venv"
   python_bin="$work/venv/bin/python"
   "$python_bin" -m pip --disable-pip-version-check install --quiet -r "$project/requirements.txt"
@@ -73,13 +68,15 @@ cd "$project"
 "$python_bin" -m unittest discover -s tests -v
 "$python_bin" demo.py
 
-if [[ "$outage" == true ]]; then
-  "${client[@]}" -e 'CREATE DATABASE outage_replay CHARACTER SET utf8mb4'
-  "${client[@]}" outage_replay < "$project/schema.sql"
-  MYSQL_DATABASE=outage_replay "$python_bin" outage_demo.py
+if [[ "$mode" == --outage || "$mode" == --suspension ]]; then
+  example=${mode#--}
+  database=${example}_replay
+  "${client[@]}" -e "CREATE DATABASE $database CHARACTER SET utf8mb4"
+  "${client[@]}" "$database" < "$project/schema.sql"
+  MYSQL_DATABASE="$database" "$python_bin" "${example}_demo.py"
 fi
 
-if [[ "$archives" == true ]]; then
+if [[ "$mode" == --archives ]]; then
   mkdir "$work/archives"
   for day in 2024-12-31 2025-01-01; do
     file="BTCUSDT-1m-$day.zip"

@@ -18,6 +18,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from Function import utc_now
 from feeds import candle_row, epoch_ms
 from storage import FIELDS, KEY, get_data_from_mysql, normalize_symbol, open_engine, save_data_to_mysql
+from trading_calendar import check_trading_rows, periods
 
 BASE_URL = "https://data.binance.vision/data/spot/daily/klines"
 MICROSECOND_START = date(2025, 1, 1)
@@ -126,18 +127,24 @@ def process(engine, args):
         writer = csv.writer(sys.stdout, lineterminator="\n")
         writer.writerow(REPORT_FIELDS)
     while day < args.end:
-        archive, digest = read_day(args.symbol, day, args.archive_dir)
+        start = datetime.combine(day, time.min)
+        if any(halt is None for _, _, halt in periods(args.symbol, start, start + DAY)):
+            archive, digest = read_day(args.symbol, day, args.archive_dir)
+            print(f"{args.symbol} {day}: {len(archive)} archive rows, SHA-256 {digest}", file=sys.stderr)
+        else:
+            # A fully suspended day expects zero candles. Reconciliation still checks MySQL for stray rows.
+            archive = pd.DataFrame(columns=FIELDS)
+            print(f"{args.symbol} {day}: trading suspended for the full UTC day, archive skipped.", file=sys.stderr)
         if args.command == "import":
             # One transaction per validated day. Existing WebSocket, REST and archive keys retain their values.
             save_data_to_mysql(engine, "k", archive)
         else:
-            start = datetime.combine(day, time.min)
+            check_trading_rows(archive)
             stored = get_data_from_mysql(engine, "k", symbol=args.symbol, begin_time=start, end_time=start + DAY,
                                          all_fields=True)
             for row in differences(args.symbol, archive, stored):
                 writer.writerow(row)
                 mismatches += 1
-        print(f"{args.symbol} {day}: {len(archive)} archive rows, SHA-256 {digest}", file=sys.stderr)
         count += len(archive)
         day += DAY
     if args.command == "reconcile":

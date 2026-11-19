@@ -8,6 +8,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
 from Function import MINUTE, floor_time, utc_now
+from trading_calendar import periods
 from windows import repair_window
 
 CHUNK = 1000 * MINUTE
@@ -51,7 +52,17 @@ def catch_up(engine, selected, cutoff, *, fetch=None, stopping=None):
         symbol, start = pending.popleft()
         if start >= cutoff:
             continue
-        end = min(start + CHUNK, cutoff)
+        _, boundary, halt = next(periods(symbol, start, cutoff))
+        if halt is not None:
+            # An ongoing suspension keeps its position until a reopening time is confirmed.
+            if halt.resume is not None:
+                advance_checkpoint(engine, symbol, start, boundary)
+            print(f"{symbol} suspended [{start}, {boundary}) UTC | minutes={(boundary - start) // MINUTE} "
+                  f"| {halt.reason}", flush=True)
+            if boundary < cutoff:
+                pending.append((symbol, boundary))
+            continue
+        end = min(start + CHUNK, boundary)
         try:
             missing = repair_window(engine, "k", symbol, start, end, fetch=fetch, now=cutoff)
         except (requests.RequestException, ValueError) as exc:
