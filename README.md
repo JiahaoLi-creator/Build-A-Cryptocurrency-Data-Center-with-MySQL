@@ -1,8 +1,8 @@
 # Binance Spot K 线数据中心 · MySQL
 
-多个策略可以共用一份行情。采集程序将 Binance 现货已收盘的 1 分钟 K 线写进 MySQL，补数程序用公开 REST 接口修复缺失的分钟，读取程序按指定周期输出完整的 OHLCV。所有时间都是 UTC。
+多个策略可以从 MySQL 读取同一份 Binance 现货行情。采集程序通过 WebSocket 接收已收盘的 1 分钟 K 线，按交易对、周期和 UTC 开盘时间去重。补数程序检查指定时间段，通过 REST 接口补回缺失的分钟线。
 
-本项目经朱建廷本人同意，根据其 2021 年 6 月 24 日的《MySQL搭建数字货币简易数据中心》整理。原教程提供了采集、补数与重采样的实现。本版增加了可重复运行的建库流程、数据库唯一键、统一时间处理、完整窗口检查和固定样例。[QuantClass 原帖](https://bbs.quantclass.cn/thread/5004) · [原脚本快照](https://github.com/JiahaoLi-creator/Build-A-Cryptocurrency-Data-Center-with-MySQL/tree/5713b3be9321cfc93ec96a41a847fa3071861994)
+读取程序按指定周期计算开盘价、最高价、最低价、收盘价和成交量（OHLCV）。例如，5 分钟窗口内的 5 根分钟线全部到齐后，才会输出该窗口的 K 线。随附的 10 根模拟分钟线可用于离线验证补数、去重和聚合结果。
 
 ## 快速复现 · Quick start
 
@@ -94,4 +94,4 @@ ORDER BY candle_begin_time DESC LIMIT 10;
 - 表 `k` 按 `(symbol, time_interval, candle_begin_time)` 唯一。WebSocket 重发、REST 补数与并发写入同一分钟时保留第一条已落库记录。价格和数量使用 `DECIMAL`。可选的 `candles_utc.csv` 是采集事件日志，可能包含重发事件。配置 `CSV_FILE=` 可关闭它。
 - 补数窗口是左闭右开的 UTC 分钟区间，包括缺失的首尾分钟。默认检查最近 100 分钟，可通过 `--minutes` 和 `--end` 指定更早的区间。连续缺口按每个请求最多 1000 根拆分。接口无数据时会报告剩余缺口，单次运行以非零状态退出。[Binance K 线接口](https://developers.binance.com/docs/binance-spot-api-docs/rest-api/market-data-endpoints)
 - 聚合按 UTC 边界对齐。五分钟窗口要求五个不同的、已收盘的连续分钟。开盘价取第一笔分钟开盘，最高价取最大值，最低价取最小值，收盘价取最后一分钟收盘，成交量求和。最新分钟迟到时会等待最多约 5 秒，仍缺失则跳过该币种。历史窗口内有缺口时只展示完整窗口，并报告实际数量。
-- 旧教程的 `binance.k` 可能使用服务器本地时间并含重复行。本版默认使用新库 `binance_utc`。若要迁移旧数据，先根据原服务器时区转换时间，再核对重复记录后导入新表。
+- 默认数据库为 `binance_utc`。从已有的 `binance.k` 迁移数据时，先确认时间戳的时区并统一换算为 UTC，再按交易对、周期和开盘时间核对重复记录，最后导入新表。
