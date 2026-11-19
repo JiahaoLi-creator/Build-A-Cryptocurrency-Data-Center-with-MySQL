@@ -15,11 +15,15 @@ FIELDS = KEY + OHLCV + [
 DEFAULT_SYMBOLS = "BTCUSDT,ETHUSDT,BNBUSDT,DOGEUSDT,SUSHIUSDT,FILUSDT,UNIUSDT,LINKUSDT,LTCUSDT,DOTUSDT"
 
 
+def normalize_symbol(value):
+    symbol = value.strip().upper()
+    if not re.fullmatch(r"[A-Z0-9]{2,32}", symbol):
+        raise ValueError(f"Expected a Spot symbol such as BTCUSDT, got {value!r}")
+    return symbol
+
+
 def symbols():
-    selected = list(dict.fromkeys(x.strip().upper() for x in os.getenv("SYMBOLS", DEFAULT_SYMBOLS).split(",")))
-    if not all(re.fullmatch(r"[A-Z0-9]{2,32}", x) for x in selected):
-        raise ValueError("SYMBOLS must be a comma-separated list such as BTCUSDT,ETHUSDT")
-    return selected
+    return list(dict.fromkeys(normalize_symbol(x) for x in os.getenv("SYMBOLS", DEFAULT_SYMBOLS).split(",")))
 
 
 def open_engine():
@@ -46,7 +50,7 @@ def table_identifier(name):
 
 
 def get_data_from_mysql(engine, table_name, symbol="BTCUSDT", time_interval="1m",
-                        begin_time=None, limit=100, sql="", end_time=None):
+                        begin_time=None, limit=100, sql="", end_time=None, *, all_fields=False):
     """Read a half-open UTC range, or the latest limit rows in descending order."""
     if sql:
         return pd.read_sql_query(text(sql), engine, coerce_float=False)
@@ -61,7 +65,7 @@ def get_data_from_mysql(engine, table_name, symbol="BTCUSDT", time_interval="1m"
     if end_time is not None:
         conditions.append("candle_begin_time < :end")
         params["end"] = end_time
-    columns = ["symbol", "candle_begin_time", "time_interval", *OHLCV]
+    columns = FIELDS if all_fields else ["symbol", "candle_begin_time", "time_interval", *OHLCV]
     query = f"SELECT {', '.join(columns)} FROM {table_identifier(table_name)} WHERE " + " AND ".join(conditions)
     if begin_time is None:
         if limit < 1:

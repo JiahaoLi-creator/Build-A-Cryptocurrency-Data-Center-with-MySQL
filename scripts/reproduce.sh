@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# One isolated MySQL server, one Python environment, a fixed market-data replay.
+# Replay the market-data examples against an isolated MySQL server.
 set -euo pipefail
 project=$(cd "$(dirname "$0")/.." && pwd)
 python_bin=${PYTHON:-python3.11}
 offline=false
+archives=false
 case "${1:-}" in
   --offline) offline=true ;;
+  --archives) archives=true ;;
   "") ;;
-  *) echo "Usage: bash scripts/reproduce.sh [--offline]" >&2; exit 2 ;;
+  *) echo "Usage: bash scripts/reproduce.sh [--offline|--archives]" >&2; exit 2 ;;
 esac
 for bin in "$python_bin" mysqld mysql mysqladmin; do
   command -v "$bin" >/dev/null || { echo "Missing executable: $bin" >&2; exit 1; }
@@ -68,3 +70,53 @@ export MYSQL_UNIX_PORT="$socket" MYSQL_HOST=localhost MYSQL_PORT=3306 MYSQL_USER
 cd "$project"
 "$python_bin" -m unittest discover -s tests -v
 "$python_bin" demo.py
+
+if [[ "$archives" == true ]]; then
+  mkdir "$work/archives"
+  for day in 2024-12-31 2025-01-01; do
+    file="BTCUSDT-1m-$day.zip"
+    base="https://data.binance.vision/data/spot/daily/klines/BTCUSDT/1m"
+    for name in "$file" "$file.CHECKSUM"; do
+      curl --fail --silent --show-error --location --retry 3 --max-time 60 "$base/$name" -o "$work/archives/$name"
+    done
+  done
+  range=(--symbol BTCUSDT --start 2024-12-31 --end 2025-01-02)
+  snapshot=("${range[@]}" --archive-dir "$work/archives")
+  for pass in 1 2; do
+    "$python_bin" archive.py import "${snapshot[@]}"
+    counts=$("${client[@]}" --batch --skip-column-names binance_utc -e \
+      'SELECT COUNT(*), COUNT(DISTINCT symbol,time_interval,candle_begin_time) FROM k')
+    if [[ "$counts" != $'2880\t2880' ]]; then
+      echo "Unexpected total and distinct candle counts on pass $pass: $counts" >&2
+      exit 1
+    fi
+    echo "Archive import $pass: 2880 rows, 2880 unique candle keys."
+  done
+  "$python_bin" archive.py reconcile "${snapshot[@]}"
+
+  # The changed candle lives in a separate schema on this disposable server.
+  "${client[@]}" <<'SQL'
+CREATE DATABASE archive_test;
+CREATE TABLE archive_test.k LIKE binance_utc.k;
+INSERT INTO archive_test.k SELECT * FROM binance_utc.k;
+UPDATE archive_test.k SET volume = volume + 1
+WHERE symbol = 'BTCUSDT' AND time_interval = '1m' AND candle_begin_time = '2025-01-01 00:00:00';
+SQL
+  status=0
+  MYSQL_DATABASE=archive_test "$python_bin" archive.py reconcile "${snapshot[@]}" > "$work/diff.csv" || status=$?
+  if [[ "$status" != 1 ]]; then echo "Expected a reconciliation difference, got exit $status" >&2; exit 1; fi
+  cat "$work/diff.csv"
+  "$python_bin" - "$work/diff.csv" <<'PY'
+import csv
+import sys
+
+with open(sys.argv[1], newline="") as report:
+    rows = list(csv.DictReader(report))
+expected = dict(issue="field_mismatch", symbol="BTCUSDT", interval="1m", open_time_utc="2025-01-01T00:00:00Z",
+                field="volume", archive_value="8.21827", mysql_value="9.21827", delta="1")
+if rows != [expected]:
+    raise SystemExit(f"Unexpected reconciliation output: {rows}")
+PY
+  echo "Verified one changed volume in the test copy. Rechecking the original database against the online archives."
+  "$python_bin" archive.py reconcile "${range[@]}"
+fi
