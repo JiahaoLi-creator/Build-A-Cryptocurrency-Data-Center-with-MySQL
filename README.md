@@ -1,6 +1,6 @@
 # Binance Spot Market Data Center
 
-This project stores closed, one-minute Binance Spot candles in MySQL. A WebSocket collector records live candles, a REST job fills missing minutes, and a historical importer loads verified daily archives into the same table. A reconciliation command compares the stored prices, volumes and trade counts with the archive and reports differences by UTC minute. The reader builds open, high, low, close and volume (OHLCV) bars from complete windows.
+This project stores closed, one-minute Binance Spot candles in MySQL. The WebSocket collector records live candles and automatically backfills missed minutes over REST after a restart or reconnection. A historical importer loads verified daily archives into the same table. A reconciliation command compares stored prices, volumes and trade counts with the archive by UTC minute. The reader builds open, high, low, close and volume (OHLCV) bars from complete windows.
 
 ## Run the sample
 
@@ -57,6 +57,24 @@ issue,symbol,interval,open_time_utc,field,archive_value,mysql_value,delta
 field_mismatch,BTCUSDT,1m,2025-01-01T00:00:00Z,volume,8.21827,9.21827,1
 ```
 
+## Reproduce a three-hour collector outage
+
+From the cloned repository, run this command with the sample prerequisites and internet access. It starts an isolated MySQL database and downloads the checksum-verified BTCUSDT Spot archive for January 1, 2025.
+
+```bash
+bash scripts/reproduce.sh --outage
+```
+
+Three separate Python processes run the collector's normal `--once` entry point against the same database. The replay controls the clock and plays the two boundary candles as WebSocket events. The first process saves the 00:59 UTC close, then goes offline. The next process starts at 04:00 UTC and fetches **180 missing minutes**, from 01:00 through 03:59, from the public Binance Spot REST endpoint. The 04:00 candle arrives over the simulated socket before the REST rows are written. The third process restarts against the recovered database and receives the same 04:00 close again.
+
+| Collector process | REST requests | Unique minutes in the outage | Total rows / unique keys |
+|---|---:|---:|---:|
+| Before the outage | 0 | 0 | 1 / 1 |
+| First restart | 1 | 180 | 182 / 182 |
+| Repeat restart | 0 | 180 | 182 / 182 |
+
+The 182 rows include one live candle on each side of the outage. The replay compares all nine market fields with the archive and verifies that the next minute to check is 04:01 UTC. [Replay code](outage_demo.py) · [Linux verification runs](https://github.com/JiahaoLi-creator/Build-A-Cryptocurrency-Data-Center-with-MySQL/actions/workflows/archive-replay.yml)
+
 ## Run against a persistent MySQL database
 
 Create a UTC database and a local application account as a MySQL administrator. MySQL returns the generated password for use in the local configuration. For a Unix socket connection, use `localhost` as the account host.
@@ -68,7 +86,7 @@ GRANT SELECT, INSERT, UPDATE, CREATE TEMPORARY TABLES
     ON binance_utc.* TO 'kline'@'127.0.0.1';
 ```
 
-Create the candle table, install the Python dependencies and copy the configuration template.
+Create the candle and checkpoint tables, install the Python dependencies and copy the configuration template. For an existing installation, reapply `schema.sql` as the database administrator before restarting the collector. Both tables use `CREATE TABLE IF NOT EXISTS`.
 
 ```bash
 mysql -u root -p binance_utc < schema.sql
@@ -109,7 +127,7 @@ Reconciliation reads MySQL without changing it. It compares open, high, low, clo
 
 ### Collect, repair and read
 
-Run the three commands in order. The collector exits after storing one closed candle. The repair job checks the last 15 closed minutes for each configured symbol. The reader then reports the complete bars in the last two five-minute windows.
+The collector automatically resumes each configured symbol and exits after one live close in `--once` mode. The second command is a separate, bounded audit of the last 15 closed minutes. The reader reports complete bars in the last two five-minute windows.
 
 ```bash
 python 1_binance_data_to_mysql.py --once
@@ -133,6 +151,12 @@ SELECT symbol, candle_begin_time, open, high, low, close, volume
 FROM k WHERE symbol = 'BTCUSDT' AND time_interval = '1m'
 ORDER BY candle_begin_time DESC LIMIT 10;
 ```
+
+### How restart recovery works
+
+MySQL stores the next unverified UTC minute for each symbol in `collector_checkpoint`. On first startup, a symbol with existing candles begins verification at its oldest stored closed minute. An empty symbol starts at the current UTC minute. A live close advances the checkpoint only if it closes the next expected minute. A later close is stored immediately while the gap stays pending.
+
+The collector checks for gaps on startup and when the socket reconnects. In continuous mode it also checks again after 60 seconds. A background worker verifies up to 1,000 closed minutes per symbol per turn and issues REST requests only for missing minutes. It advances the checkpoint through the contiguous rows confirmed in MySQL. An empty or partial response leaves the earliest unresolved minute pending for a retry. If the process stops after writing rows but before updating the checkpoint, the next run reads those rows and requests only what is still missing. A one-time run exits with a nonzero status if recovery is incomplete. The independent repair command's 100-minute default applies only to that command.
 
 ## Data handling
 

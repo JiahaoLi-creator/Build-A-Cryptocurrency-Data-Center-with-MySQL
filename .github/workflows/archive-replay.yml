@@ -1,4 +1,4 @@
-name: Historical archive replay
+name: Market data replays
 
 on: [push, pull_request, workflow_dispatch]
 
@@ -7,6 +7,11 @@ permissions:
 
 jobs:
   replay:
+    name: ${{ matrix.mode }} replay
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [archives, outage]
     runs-on: ubuntu-24.04
     container: debian:12-slim
     timeout-minutes: 15
@@ -25,10 +30,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Run the documented archive replay
+      - name: Run the documented replay
+        env:
+          REPLAY_MODE: ${{ matrix.mode }}
         run: |
           cat /etc/os-release
           uname -m
           python3.11 --version
           mysqld --version
-          bash scripts/reproduce.sh --archives
+          bash scripts/reproduce.sh "--$REPLAY_MODE"
