@@ -1,6 +1,6 @@
 # Binance Spot Market Data Center
 
-This project stores closed, one-minute Binance Spot candles in MySQL. The WebSocket collector recovers missed trading minutes over REST after a restart or reconnection. A trading calendar excludes exchange-confirmed suspensions from backfill and aggregation. A historical importer loads verified daily archives into the same table. A reconciliation command compares stored prices, volumes and trade counts with the archive by UTC minute. The reader builds open, high, low, close and volume (OHLCV) bars from complete windows.
+This project stores closed, one-minute Binance Spot candles in MySQL. The WebSocket collector recovers missed trading minutes over REST after a restart or reconnection. A trading calendar excludes exchange-confirmed suspensions from backfill and aggregation. A historical importer loads verified daily archives into the same table. A reconciliation command compares stored prices, volumes and trade counts with the archive by UTC minute. The reader builds open, high, low, close and volume (OHLCV) bars from complete windows with a configurable UTC start minute.
 
 ## Run the sample
 
@@ -95,6 +95,24 @@ The replay uses the last five minutes before delisting and the first five after 
 
 The only five-minute bars open at **October 31 02:55 UTC** and **November 9 08:00 UTC**. The checkpoint ends at November 9 08:05 UTC. [Replay code](suspension_demo.py) · [Linux verification runs](https://github.com/JiahaoLi-creator/Build-A-Cryptocurrency-Data-Center-with-MySQL/actions/workflows/archive-replay.yml)
 
+## Reproduce five-minute bars with a shifted start
+
+Run the following command from the cloned repository with the sample prerequisites and internet access.
+
+```bash
+bash scripts/reproduce.sh --offset
+```
+
+The replay verifies the SHA-256 checksum of the BTCUSDT Spot minute archive for January 1, 2025 and loads its first ten minutes into an isolated MySQL database. At the 00:10 UTC cutoff, the same ten records produce the following complete bars. Prices are in USDT and volume is in BTC. [Minute archive](https://data.binance.vision/data/spot/daily/klines/BTCUSDT/1m/BTCUSDT-1m-2025-01-01.zip) · [Published five-minute candles](https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=5m&startTime=1735689600000&endTime=1735690199999&limit=2)
+
+| Offset (min) | Minute opens included (UTC) | Open | High | Low | Close | Volume |
+|---:|---|---:|---:|---:|---:|---:|
+| 0 | 00:00 through 00:04 | 93,576.00 | 93,702.15 | 93,537.50 | 93,661.20 | 45.94160 |
+| 0 | 00:05 through 00:09 | 93,661.20 | 93,678.02 | 93,600.00 | 93,607.10 | 71.94585 |
+| 2 | 00:02 through 00:06 | 93,652.00 | 93,702.15 | 93,600.00 | 93,632.05 | 61.04142 |
+
+The two default bars must match the exchange's published five-minute candles. For the shifted bar, the replay calculates all five OHLCV fields independently from the five archived minute rows and checks the first instant the result becomes available, 00:07 UTC. The preceding shifted window needs three minutes from the previous day. The following window closes at 00:12 UTC. Only the middle window qualifies in this sample. [Replay code](offset_demo.py)
+
 ## Run against a persistent MySQL database
 
 Create a UTC database and a local application account as a MySQL administrator. MySQL returns the generated password for use in the local configuration. For a Unix socket connection, use `localhost` as the account host.
@@ -164,6 +182,14 @@ SYMBOLS=BTCUSDT python 2_check_data.py --once --minutes 10 --end 2024-01-01T00:1
 SYMBOLS=BTCUSDT python 3_get_data_and_sample.py --once --interval 5m --limit 2 --as-of 2024-01-01T00:10:00Z
 ```
 
+Use `--offset-minutes` to shift bar opens forward from the UTC Unix epoch. The default is zero. The offset accepts whole minutes from zero up to the interval length, exclusive. For example, five-minute bars at offset two open at :02, :07, :12 and so on. The continuous reader wakes on that schedule. The Python reader accepts the same setting as `get_k_data(..., offset_minutes=2)`.
+
+```bash
+SYMBOLS=BTCUSDT python 3_get_data_and_sample.py --once --interval 5m --offset-minutes 2 --limit 1 --as-of 2025-01-01T00:10:00Z
+```
+
+`--limit` counts the most recent closed windows on the selected grid. Every constituent minute must be present and open for trading. A bar is labelled by its opening time and becomes available at its exclusive end. Offsets apply when reading and use the same stored one-minute records.
+
 To inspect the most recent one-minute candles directly in MySQL, run this query.
 
 ```sql
@@ -186,5 +212,5 @@ Each calendar entry identifies a Spot symbol, the first suspended UTC minute, th
 
 - **Duplicate events.** Table `k` enforces a unique key on `(symbol, time_interval, candle_begin_time)`. WebSocket, REST and archive imports all retain the first stored candle for that key. Prices and quantities use `DECIMAL`. The optional `candles_utc.csv` records WebSocket arrivals and can contain repeated events. Set `CSV_FILE=` to disable that log.
 - **Missing minutes.** The repair job checks expected trading minutes from the inclusive start to the exclusive end, including gaps at either edge. It reports missing and suspended minutes separately. Its default window is the last 100 closed minutes. Use `--minutes` and `--end` to select another range. Each REST request covers at most 1,000 consecutive missing trading minutes. If gaps remain, a one-time run reports the count and exits with a nonzero status. [Binance candlestick endpoint](https://developers.binance.com/docs/binance-spot-api-docs/rest-api/market-data-endpoints)
-- **Complete bars.** Windows align to UTC boundaries. The reader uses the first open, highest high, lowest low, last close and total volume. A five-minute bar requires five distinct closed minutes. During a live read, the reader waits up to about five seconds for the latest closed minute. If it is still missing, the reader skips that symbol. It reports how many requested windows are complete.
+- **Complete bars.** Windows align to the selected UTC offset. The reader uses the first open, highest high, lowest low, last close and total volume. A five-minute bar requires five distinct closed minutes. During a live read, the reader waits up to about five seconds for the latest closed minute. If it is still missing, the reader skips that symbol. It reports how many requested windows are complete.
 - **Existing data.** The default database is `binance_utc`. When importing an existing `binance.k` table, identify the source time zone, convert open times to UTC and reconcile duplicate candle keys before loading the data.
