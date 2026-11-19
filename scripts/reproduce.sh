@@ -5,11 +5,13 @@ project=$(cd "$(dirname "$0")/.." && pwd)
 python_bin=${PYTHON:-python3.11}
 offline=false
 archives=false
+outage=false
 case "${1:-}" in
   --offline) offline=true ;;
   --archives) archives=true ;;
+  --outage) outage=true ;;
   "") ;;
-  *) echo "Usage: bash scripts/reproduce.sh [--offline|--archives]" >&2; exit 2 ;;
+  *) echo "Usage: bash scripts/reproduce.sh [--offline|--archives|--outage]" >&2; exit 2 ;;
 esac
 for bin in "$python_bin" mysqld mysql mysqladmin; do
   command -v "$bin" >/dev/null || { echo "Missing executable: $bin" >&2; exit 1; }
@@ -70,6 +72,12 @@ export MYSQL_UNIX_PORT="$socket" MYSQL_HOST=localhost MYSQL_PORT=3306 MYSQL_USER
 cd "$project"
 "$python_bin" -m unittest discover -s tests -v
 "$python_bin" demo.py
+
+if [[ "$outage" == true ]]; then
+  "${client[@]}" -e 'CREATE DATABASE outage_replay CHARACTER SET utf8mb4'
+  "${client[@]}" outage_replay < "$project/schema.sql"
+  MYSQL_DATABASE=outage_replay "$python_bin" outage_demo.py
+fi
 
 if [[ "$archives" == true ]]; then
   mkdir "$work/archives"

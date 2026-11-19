@@ -16,3 +16,9 @@ CREATE TABLE IF NOT EXISTS k (
     PRIMARY KEY (id),
     UNIQUE KEY uq_kline (symbol, time_interval, candle_begin_time)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- First UTC minute the one-minute collector still needs to verify for each symbol.
+CREATE TABLE IF NOT EXISTS collector_checkpoint (
+    symbol VARCHAR(32) CHARACTER SET ascii NOT NULL PRIMARY KEY,
+    next_open_time DATETIME NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
