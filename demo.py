@@ -98,6 +98,8 @@ def replay(conn):
             check(list(missing) == [parse_utc(source[3]["utc"])], "unavailable gap was hidden")
             partial = get_k_data(SYMBOL, "5m", 2, conn, TABLE, as_of=end)
             check(values(partial) == expected[1:], "returned incomplete first 5m bar")
+            check(get_k_data(SYMBOL, "5m", 2, conn, TABLE, as_of=end, offset_minutes=2).empty,
+                  "returned a shifted bar with its 00:03 minute missing")
             print("Before repair: 9 unique minutes; 00:03 missing; only the 00:05 bar is complete.")
 
         remaining = repair_window(conn, TABLE, SYMBOL, start, end, fetch=fixture_rest, now=end)
@@ -108,6 +110,9 @@ def replay(conn):
         check(actual_minutes == expected_minutes, "stored minute values differ from the independent fixture")
         bars = get_k_data(SYMBOL, "5m", 2, conn, TABLE, as_of=end)
         check(values(bars) == expected, "5m OHLCV differs from examples/expected_5m.csv")
+        shifted = get_k_data(SYMBOL, "5m", 2, conn, TABLE, as_of=end, offset_minutes=2)
+        check(values(shifted) == [(start + 2 * MINUTE, 103, 112, 98, 111, 25)],
+              "the shifted bar must use exactly the 00:02 through 00:06 sample minutes")
         check(values(get_k_data(SYMBOL, "5m", 1, conn, TABLE, as_of=end)) == expected[-1:], "limit=1 failed")
         check(if_data_available(conn, TABLE, SYMBOL, end), "latest closed minute missing")
         check(not if_data_available(conn, TABLE, SYMBOL, end + MINUTE), "stale data reported as current")

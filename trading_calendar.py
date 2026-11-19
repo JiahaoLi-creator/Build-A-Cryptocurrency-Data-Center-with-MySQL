@@ -99,13 +99,13 @@ def check_trading_rows(frame):
                 raise SuspendedCandleError(f"{symbol} {blocked.iloc[0]} UTC conflicts with a documented trading suspension")
 
 
-def eligible_bar_count(symbol, cutoff, step, limit):
-    """Count complete UTC-aligned windows that lie entirely within trading periods."""
-    end = floor_time(cutoff, step)
+def eligible_bar_count(symbol, cutoff, step, limit, *, offset_minutes=0):
+    """Count windows on the selected UTC grid that lie entirely within trading periods."""
+    end = floor_time(cutoff, step, offset_minutes=offset_minutes)
     count = 0
     for left, right, halt in periods(symbol, end - limit * step, end):
         if halt is None:
-            first = floor_time(left, step)
+            first = floor_time(left, step, offset_minutes=offset_minutes)
             if first < left:
                 first += step
             count += max(0, (right - first) // step)

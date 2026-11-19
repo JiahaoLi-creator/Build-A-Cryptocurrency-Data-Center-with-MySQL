@@ -79,12 +79,12 @@ def if_data_available(engine=None, table_name="k", symbol="BTCUSDT", as_of=None)
 
 
 def get_k_data(symbol="BTCUSDT", target_time_interval="15m", limit=100,
-               engine=None, table_name="k", time_interval="1m", as_of=None):
-    """Return complete bars within the last limit closed target windows, indexed by UTC open."""
+               engine=None, table_name="k", time_interval="1m", as_of=None, *, offset_minutes=0):
+    """Return complete bars from the last limit closed windows on the requested UTC minute grid."""
     step = interval_delta(target_time_interval)
     if time_interval != "1m" or limit < 1:
         raise ValueError("Expected 1m inputs and a positive number of target bars")
-    end = floor_time(utc_now() if as_of is None else as_of, step)
+    end = floor_time(utc_now() if as_of is None else as_of, step, offset_minutes=offset_minutes)
     frame = get_data_from_mysql(engine, table_name, symbol=symbol, time_interval=time_interval,
                                 begin_time=end - limit * step, end_time=end)
     frame = frame.set_index("candle_begin_time")
@@ -93,7 +93,7 @@ def get_k_data(symbol="BTCUSDT", target_time_interval="15m", limit=100,
     # A full bucket has every distinct minute on the grid exactly once.
     on_grid = frame.index == frame.index.floor("min")
     frame = frame.loc[on_grid & ~frame.index.duplicated(keep="first") & ~suspended_mask(symbol, frame.index)]
-    groups = frame.resample(step, origin="epoch", closed="left", label="left")
+    groups = frame.resample(step, origin=end, closed="left", label="left")
     with localcontext() as precision:
         precision.prec = 65  # Preserve DECIMAL prices and summed quantities from MySQL.
         bars = groups.agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"})

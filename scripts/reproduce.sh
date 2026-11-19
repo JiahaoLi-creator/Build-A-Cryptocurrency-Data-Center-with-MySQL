@@ -5,8 +5,8 @@ project=$(cd "$(dirname "$0")/.." && pwd)
 python_bin=${PYTHON:-python3.11}
 mode=${1:-}
 case "$mode" in
-  ""|--offline|--archives|--outage|--suspension) ;;
-  *) echo "Usage: bash scripts/reproduce.sh [--offline|--archives|--outage|--suspension]" >&2; exit 2 ;;
+  ""|--offline|--archives|--outage|--suspension|--offset) ;;
+  *) echo "Usage: bash scripts/reproduce.sh [--offline|--archives|--outage|--suspension|--offset]" >&2; exit 2 ;;
 esac
 for bin in "$python_bin" mysqld mysql mysqladmin; do
   command -v "$bin" >/dev/null || { echo "Missing executable: $bin" >&2; exit 1; }
@@ -68,12 +68,16 @@ cd "$project"
 "$python_bin" -m unittest discover -s tests -v
 "$python_bin" demo.py
 
-if [[ "$mode" == --outage || "$mode" == --suspension ]]; then
+if [[ "$mode" == --outage || "$mode" == --suspension || "$mode" == --offset ]]; then
   example=${mode#--}
   database=${example}_replay
   "${client[@]}" -e "CREATE DATABASE $database CHARACTER SET utf8mb4"
   "${client[@]}" "$database" < "$project/schema.sql"
   MYSQL_DATABASE="$database" "$python_bin" "${example}_demo.py"
+  if [[ "$mode" == --offset ]]; then
+    MYSQL_DATABASE="$database" SYMBOLS=BTCUSDT "$python_bin" 3_get_data_and_sample.py \
+      --once --interval 5m --offset-minutes 2 --limit 1 --as-of 2025-01-01T00:10:00Z
+  fi
 fi
 
 if [[ "$mode" == --archives ]]; then
