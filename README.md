@@ -1,6 +1,6 @@
 # Binance Spot Market Data Center
 
-This project stores closed, one-minute Binance Spot candles in MySQL so multiple strategies can read the same market history. A WebSocket collector writes each candle once, and a REST job checks a selected period for missing minutes and backfills them. The reader builds open, high, low, close and volume (OHLCV) bars only when every minute in the requested interval is present. All candle times are in UTC.
+This project stores closed, one-minute Binance Spot candles in MySQL. A WebSocket collector records live candles, a REST job fills missing minutes, and a historical importer loads verified daily archives into the same table. A reconciliation command compares the stored prices, volumes and trade counts with the archive and reports differences by UTC minute. The reader builds open, high, low, close and volume (OHLCV) bars from complete windows.
 
 ## Run the sample
 
@@ -37,6 +37,26 @@ The sample contains ten synthetic `BTCUSDT` candles from 00:00 through 00:09 UTC
 | 2024-01-01 00:00 | 100 | 108 | 98 | 107 | 15 |
 | 2024-01-01 00:05 | 107 | 113 | 104 | 109 | 40 |
 
+## Reproduce the two-day historical import
+
+From the cloned repository, run the following command with the same prerequisites as the sample, plus `curl` and internet access. It starts a fresh MySQL server, runs the ten-minute sample, and downloads the two public BTCUSDT Spot archives and their SHA-256 manifests. [Linux verification runs](https://github.com/JiahaoLi-creator/Build-A-Cryptocurrency-Data-Center-with-MySQL/actions/workflows/archive-replay.yml)
+
+```bash
+bash scripts/reproduce.sh --archives
+```
+
+| UTC archive date | Timestamp unit in the ZIP | Distinct minutes |
+|---|---|---:|
+| 2024-12-31 | Milliseconds | 1,440 |
+| 2025-01-01 | Microseconds | 1,440 |
+
+The replay imports the same two files twice. After each pass, MySQL must report **2,880 rows and 2,880 distinct candle keys**. All nine stored market fields must match the archives. The replay then copies the table to a separate test database and increases the base-asset volume for the first minute of 2025 by exactly one BTC. The report must contain exactly the row below. A final comparison downloads the archives again and must find zero differences in the original database.
+
+```csv
+issue,symbol,interval,open_time_utc,field,archive_value,mysql_value,delta
+field_mismatch,BTCUSDT,1m,2025-01-01T00:00:00Z,volume,8.21827,9.21827,1
+```
+
 ## Run against a persistent MySQL database
 
 Create a UTC database and a local application account as a MySQL administrator. MySQL returns the generated password for use in the local configuration. For a Unix socket connection, use `localhost` as the account host.
@@ -68,6 +88,25 @@ set +a
 
 Run `python demo.py` to check the database connection and schema in a session-local temporary table. The live collector and backfill job use Binance's public market-data endpoints. [Binance market-data API](https://developers.binance.com/docs/binance-spot-api-docs/faqs/market_data_only)
 
+### Import and reconcile historical candles
+
+Both commands use one Spot symbol and a range of completed UTC days. The start is inclusive and the end is exclusive, so the example covers December 31 and January 1.
+
+```bash
+python archive.py import --symbol BTCUSDT --start 2024-12-31 --end 2025-01-02
+python archive.py reconcile --symbol BTCUSDT --start 2024-12-31 --end 2025-01-02 > differences.csv
+```
+
+Each command downloads the official daily one-minute ZIP and its `.CHECKSUM`. It verifies the SHA-256 digest, UTC date, timestamp unit, minute alignment and unique source keys before using a file. Valid partial trading days retain the minutes present in the archive. The importer commits one day at a time. An interrupted range can be replayed safely, and a previously stored candle keeps its original values. To use a saved snapshot, pass `--archive-dir DIR` to either command and put the ZIP files and their matching `.zip.CHECKSUM` files together in that directory. [Binance public archive format](https://github.com/binance/binance-public-data#data-information)
+
+Reconciliation reads MySQL without changing it. It compares open, high, low, close, base volume, quote volume, trade count, taker-buy base volume and taker-buy quote volume at each UTC open time. Prices and quantities use exact decimal arithmetic. The CSV contains one row per differing field, with `delta = mysql_value - archive_value`. A minute present on only one side produces a single `missing_in_mysql` or `unexpected_in_mysql` row. Progress, source hashes and totals go to standard error.
+
+| Reconciliation exit code | Meaning |
+|---:|---|
+| 0 | Comparison completed with zero differences. The CSV contains only its header. |
+| 1 | Comparison completed and found differences. |
+| 2 | The command could not complete. Check the input, checksum, connection or database error before using the report. |
+
 ### Collect, repair and read
 
 Run the three commands in order. The collector exits after storing one closed candle. The repair job checks the last 15 closed minutes for each configured symbol. The reader then reports the complete bars in the last two five-minute windows.
@@ -97,7 +136,7 @@ ORDER BY candle_begin_time DESC LIMIT 10;
 
 ## Data handling
 
-- **Duplicate events.** Table `k` enforces a unique key on `(symbol, time_interval, candle_begin_time)`. The first stored candle is retained when a WebSocket event or REST response is repeated. Prices and quantities use `DECIMAL`. The optional `candles_utc.csv` records arrivals and can contain repeated events. Set `CSV_FILE=` to disable that log.
+- **Duplicate events.** Table `k` enforces a unique key on `(symbol, time_interval, candle_begin_time)`. WebSocket, REST and archive imports all retain the first stored candle for that key. Prices and quantities use `DECIMAL`. The optional `candles_utc.csv` records WebSocket arrivals and can contain repeated events. Set `CSV_FILE=` to disable that log.
 - **Missing minutes.** The repair job checks every minute from the inclusive start to the exclusive end, including gaps at either edge. Its default window is the last 100 closed minutes. Use `--minutes` and `--end` to select another range. Each REST request covers at most 1,000 consecutive missing minutes. If gaps remain, a one-time run reports the count and exits with a nonzero status. [Binance candlestick endpoint](https://developers.binance.com/docs/binance-spot-api-docs/rest-api/market-data-endpoints)
 - **Complete bars.** Windows align to UTC boundaries. The reader uses the first open, highest high, lowest low, last close and total volume. A five-minute bar requires five distinct closed minutes. During a live read, the reader waits up to about five seconds for the latest closed minute. If it is still missing, the reader skips that symbol. It reports how many requested windows are complete.
 - **Existing data.** The default database is `binance_utc`. When importing an existing `binance.k` table, identify the source time zone, convert open times to UTC and reconcile duplicate candle keys before loading the data.
